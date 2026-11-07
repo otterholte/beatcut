@@ -3,6 +3,15 @@
 Give it photos and/or video clips and a song. It finds the beat, lays the media out in a template style, puts a subtle
 sound effect on every visual hit, and renders an MP4. No manual editing.
 
+**Use it online: https://otterholte.github.io/beatcut/** (Chrome or Edge works best). The web version in `docs/`
+runs entirely in the browser: the beat finding, the drawing (canvas) and the MP4 encoding (WebCodecs with
+[mp4-muxer](https://github.com/Vanilagy/mp4-muxer)), so photos and songs never leave the visitor's device. It has the
+same ten styles as the Python version. GitHub Pages serves it from `docs/` on `main`; there is no build step.
+
+The Python version below is the original: the same styles, plus composing songs with ElevenLabs.
+
+## Python version
+
 Python 3.10+ with `numpy`, `opencv-python`, `Pillow` and `imageio-ffmpeg` (for its ffmpeg binary):
 
 ```bash
@@ -12,7 +21,7 @@ pip install -r requirements.txt
 Composing songs needs an ElevenLabs key in `ELEVENLABS_API_KEY` or `elevenlabs_key.txt` (gitignored). Finding
 photos needs nothing.
 
-## The app
+### The app
 
 ```bash
 python app.py        # http://localhost:8300
@@ -23,7 +32,7 @@ the ten styles (each card plays a sample on hover once you have rendered the sam
 the song, and the same edit with only the sound effects, for posting on Instagram / TikTok with the song added from
 their own music library at the start time it shows (`<out>.share.json` also holds it, with the song's name and link).
 
-## Quick start
+### Quick start
 
 ```bash
 # 1. media: your own folder of photos/clips, or find licensed ones on Wikimedia Commons
@@ -44,7 +53,10 @@ edit starts, length, tempo) and `<out>.plan.json` (tempo, bar starts, every move
 
 ## How it works
 
-- `beats.py`: tempo from the autocorrelation of spectral flux, beat phase from a comb, the downbeat from kick energy.
+- `beats.py`: onsets from mel bands; tempo from their autocorrelation; the beats tracked through the song by dynamic
+  programming (Ellis 2007), so a song whose tempo drifts is followed beat by beat, and where the beats are faint they
+  simply keep to the tempo. The kick only counts when the low end has a steady pulse (songs without drums have none).
+  The downbeat comes from kick energy or the drop.
   Every move starts on a downbeat; fast steps run on sixteenth notes or one frame apart.
 - `styles.py`: a style writes a Timeline: for each cell of a rows x cols grid, what it shows from when. A cell shows a
   source drawn into a rect: the whole frame (so the cells are slices of one picture), a column, a row, or the cell alone.

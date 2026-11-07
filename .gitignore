@@ -10,3 +10,6 @@ jobs/
 
 __pycache__/
 *.pyc
+
+# the web version's style previews are part of the site
+!docs/samples/*.mp4
