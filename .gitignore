@@ -1,0 +1,12 @@
+# keys: never commit
+*_key.txt
+.env
+
+# renders, downloaded media and generated songs
+jobs/
+*.mp4
+*.wav
+*.plan.json
+
+__pycache__/
+*.pyc
