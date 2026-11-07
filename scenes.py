@@ -10,7 +10,7 @@ dump      the photo dump: polaroids drop onto a blurred backdrop one per beat an
 """
 import math, os
 import numpy as np, cv2
-from styles import slots
+from styles import slots, pace_of
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ease_out = lambda p: 1 - (1 - p) ** 3
@@ -51,13 +51,16 @@ class Velocity(Scene):
         beats = [b for b in grid['beats'] if -1e-3 <= b < end - 1e-3]
         n = len(sources); nxt = iter(range(10 ** 6))
         take = lambda: next(nxt) % n
+        p = pace_of(grid)
         self.shots, self.hits = [], []          # shots: (t, sid, transition, dir); hits: (t, shake, rgb, flash)
-        # intro: a new shot every two beats, then sixteenth-note stutter cuts on the last beat before the drop
+        # intro: a new shot every two beats (four when calm), then stutter cuts into the drop: four sixteenths, four
+        # eighths, or two eighths at the calm paces
+        s_step = min(p['step'], 0.5) * B; s_count = 2 if p['step'] >= 1 else 4; s_from = drop - s_count * s_step
         for b in beats:
-            if b >= drop - B - 1e-3: break
-            if round((b - beats[0]) / B) % 2 == 0: self.shots.append((self.snap(b), take(), 'cut', 0))
-        for k in range(4):
-            ts = drop - B + k * B / 4
+            if b >= s_from - 1e-3: break
+            if round((b - beats[0]) / B) % min(4, 2 * p['every']) == 0: self.shots.append((self.snap(b), take(), 'cut', 0))
+        for k in range(s_count):
+            ts = s_from + k * s_step
             self.shots.append((self.snap(ts), take(), 'cut', 0)); self.sound(ts, 'tick', 0.5 + 0.1 * k); self.hits.append((self.snap(ts), 0.12, 0, 0))
         self.sound(drop, 'whoosh', 0.75, d=min(drop, bar))
         if title: self.titles.append((0.0, self.snap(drop - B)))
@@ -68,7 +71,7 @@ class Velocity(Scene):
         # after the drop: a cut on every beat; the last bar holds one shot
         hold = self.snap(end - bar)
         dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-        for i, b in enumerate(x for x in beats if drop + 1e-3 < x < hold - 1e-3):
+        for i, b in enumerate(x for x in beats if drop + 1e-3 < x < hold - 1e-3 and round((x - drop) / B) % p['every'] == 0):
             b = self.snap(b); on_bar = any(abs(b - d) < 0.02 for d in downs)
             if on_bar:
                 kind = 'flash' if (len(self.moves) % 2) else 'zoom'
@@ -81,7 +84,7 @@ class Velocity(Scene):
                 self.shots.append((b, take(), 'whip', d)); self.hits.append((b, 0.25, 0.2, 0))
                 self.sound(b, 'whoosh', 0.35, pan=-0.5 * d[0], d=0.16); self.sound(b, 'tick', 0.35)
                 # double time on the off-beat of beat 3, every other bar
-                if i % 8 == 6:
+                if p['step'] <= 0.25 and i % 8 == 6:          # (at the busiest pace)
                     t2 = self.snap(b + B / 2)
                     self.shots.append((t2, take(), 'cut', 0)); self.hits.append((t2, 0.3, 0.3, 0)); self.sound(t2, 'tick', 0.6)
         self.shots.append((hold, take(), 'flash', 0)); self.hits.append((hold, 0.8, 0.8, 0.9))
@@ -164,13 +167,15 @@ class Dump(Scene):
         B, bar = grid['beat'], grid['bar']; self.B = B
         starts, L = slots(grid, seconds, 1)
         end = starts[-1] + L
-        beats = [self.snap(b) for b in grid['beats'] if -1e-3 <= b < end - 1e-3]
+        # a card (or a full-screen cut) every `every` beats of the pace
+        every = pace_of(grid)['every']; d0 = next((d for d in grid['downbeats'] if d >= -1e-3), 0)
+        beats = [self.snap(b) for b in grid['beats'] if -1e-3 <= b < end - 1e-3 and round((b - d0) / B) % every == 0]
         downs = [self.snap(d) for d in grid['downbeats'] if -1e-3 <= d < end]
         self.P = round(0.6 * H) if W >= H else round(0.74 * W)        # photo side on screen
         self.cards, self.full, self.flashes = [], [], []                # cards: dicts; full: (t0, t1, sid); flashes: t
         n = len(sources); nxt = iter(range(10 ** 6)); take = lambda: next(nxt) % n
         self.fall = min(0.14, B * 0.4)
-        pile, mode, zoom_card = [], 'pile', None
+        pile, mode, zoom_card, zoom_at = [], 'pile', None, 0
         last_bar = downs[-1] if downs else end - bar
         for b in beats:
             bi = sum(1 for d in downs if d <= b + 1e-3) - 1; on_bar = any(abs(b - d) < 1e-3 for d in downs)
@@ -181,11 +186,13 @@ class Dump(Scene):
                     for c in pile: c['sweep'] = (b, rnd.choice([-1, 1]))
                     self.sound(b, 'whoosh', 0.6, d=0.25); pile = []
                 if ph == 2 and pile and b < last_bar:
-                    zoom_card = pile[-1]; zoom_card['zoom'] = b; mode = 'full'
+                    zoom_card = pile[-1]; zoom_card['zoom'] = b; mode = 'full'; zoom_at = b
                     self.sound(b, 'whoosh', 0.5, d=0.2); self.sound(b, 'pop', 0.8)
                     continue
                 if ph == 3 and mode == 'full':
-                    self.full[-1] = (self.full[-1][0], b, self.full[-1][2]); mode = 'pile'
+                    # (at a calm pace the zoomed photo may have held the whole bar, with no full-screen cuts after it)
+                    if self.full and self.full[-1][0] >= zoom_at: self.full[-1] = (self.full[-1][0], b, self.full[-1][2])
+                    mode = 'pile'
                     for c in pile: c['gone'] = b
                     pile = []; self.flashes.append(b); self.sound(b, 'flash', 0.9)
             if mode == 'full':
@@ -198,7 +205,7 @@ class Dump(Scene):
             if not self.cards and title: c['caption'] = title
             pile.append(c); self.cards.append(c)
             self.sound(b, 'slap', 0.9, pan=(c['x'] / W - 0.5) * 1.2); self.sound(b, 'tick', 0.25)
-        if self.full and mode == 'full': self.full[-1] = (self.full[-1][0], end, self.full[-1][2])
+        if self.full and mode == 'full' and self.full[-1][0] >= zoom_at: self.full[-1] = (self.full[-1][0], end, self.full[-1][2])
         out = self.snap(end - B / 2)
         for c in pile: c.setdefault('sweep', (out, rnd.choice([-1, 1])))
         self.sound(out, 'whoosh', 0.6, d=0.25)

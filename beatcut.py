@@ -159,6 +159,9 @@ def run(job, base):
     grid = {**grid, 'beats': [b - start for b in grid['beats']], 'downbeats': [d - start for d in grid['downbeats']],
             'drop': None if grid['drop'] is None else grid['drop'] - start}
     print(f"beat: start {start:.2f}s, {grid['bpm']:.1f} BPM, first downbeat {grid['downbeats'][0]:.2f}s, bar {grid['bar']:.2f}s, song {len(audio) / sr:.1f}s")
+    lv = grid['pace']['level']; want = job.get('pace', 'auto')
+    grid['level'] = lv if want == 'auto' else (lv + 1 if lv < 3 else lv - 1) if want == 'calm' else int(want)
+    print(f"beat: moves on {stylelib.PACES[grid['level']]['name']} (the song asks for {stylelib.PACES[lv]['name']})")
     sources = load_media(job['media'], base, W, H, rnd)
     print('media:', len(sources), 'files')
     seconds = min(job.get('seconds') or 1e9, len(audio) / sr)
@@ -216,4 +219,5 @@ if __name__ == '__main__':
         if 'seconds' in opt: job['seconds'] = float(opt['seconds'])
         if 'size' in opt: job['size'] = [int(v) for v in opt['size'].split('x')]
         if 'start' in opt: job['start'] = float(opt['start'])
+        if 'pace' in opt: job['pace'] = opt['pace']
         run(job, os.getcwd())

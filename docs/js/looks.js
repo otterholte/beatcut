@@ -6,7 +6,7 @@
 // swipe      each photo slides in over the last (a little overshoot, an edge shadow), on the beat, turning round the screen.
 // filmstrip  a strip of film across the screen (down it, for vertical video) advancing one frame per beat; every fourth
 //            bar the centre frame opens to full screen for beat cuts, then a flash.
-import { slots } from './styles.js';
+import { slots, paceOf } from './styles.js';
 import { Scene } from './scenes.js';
 import { easeOut, clamp, lastAt, canvas, rng } from './util.js';
 
@@ -31,7 +31,8 @@ class Cuts extends Scene {
     super(W, H, fps, fx);
     const lk = this.lk = LOOKS[look]; this.sources = sources; const B = this.B = grid.beat;
     const [beats, downs, end, hold] = beatPlan(grid, seconds, t => this.snap(t));
-    const every = lk.every * (lk.every === 1 && B < 0.36 ? 2 : 1);      // very fast songs: every other beat
+    // the look's cut length times the pace's, at most two bars (very fast songs: every other beat at least)
+    const every = Math.min(8, Math.max(lk.every * paceOf(grid).every, B < 0.36 ? 2 : 1));
     const n = sources.length; let k = 0; this.shots = [];
     for (let i = 0; i < beats.length; i++) {
       const b = beats[i];
@@ -152,7 +153,9 @@ class Filmstrip extends Scene {
     const n = this.n = sources.length;
     this.steps = []; this.full = []; this.flashes = [];   // steps: [t, frame the strip moves to]; full: [t0, t1, [[t, sid]]]
     let idx = 0, mode = 'strip';
-    for (const b of beats) {
+    // the strip moves (and the open frame cuts) every `every` beats of the pace
+    const every = paceOf(grid).every, d0 = downs[0] ?? 0;
+    for (const b of beats.filter(x => Math.round((x - d0) / B) % every === 0)) {
       const bi = downs.filter(d => d <= b + 1e-3).length - 1, bar = on(b, downs);
       if (bar && ((bi % 4) + 4) % 4 === 3 && b < hold - 1e-3 && mode === 'strip') {
         mode = 'open'; this.full.push([b, null, [[b, idx % n]]]);

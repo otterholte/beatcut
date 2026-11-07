@@ -194,7 +194,21 @@ export function analyse(audio) {
   // bars before the first full one still count (a pickup), so the edit can start at 0
   const bar = period * 4 / rate;
   while (down[0] - bar > -0.05) down.unshift(down[0] - bar);
-  return { bpm: 60 * rate / period, beat: period / rate, bar, beats, drop: drop === null ? null : beats[drop], downbeats: down.filter(d => d > -bar) };
+  const B = period / rate;
+  return { bpm: 60 * rate / period, beat: B, bar, beats, drop: drop === null ? null : beats[drop], downbeats: down.filter(d => d > -bar), pace: pace(env, beats, B, rate) };
+}
+
+// How busy the music is between the beats, as the pace an edit should move at (an index into styles.js PACES):
+// 0 sixteenth notes (busy hi-hats, strong off-beats), 1 eighth notes, 2 quarter notes (a song with little between its
+// beats, like a strummed folk song). Fast songs move one step calmer.
+function pace(env, beats, B, rate) {
+  const peak = t => { const i = Math.round(t * rate); let m = 0; for (let k = i - 2; k <= i + 2; k++) if (k >= 0 && k < env.length) m = Math.max(m, env[k]); return m; };
+  const inSong = beats.filter(b => b > 0 && b < env.length / rate - 1);
+  const avg = f => inSong.reduce((s, b) => s + f(b), 0) / Math.max(1, inSong.length);
+  const q = avg(peak) + 1e-9, e = avg(b => peak(b + B / 2)) / q, s = avg(b => (peak(b + B / 4) + peak(b + 3 * B / 4)) / 2) / q;
+  let level = e >= 0.9 && s >= 0.2 ? 0 : e >= 0.7 ? 1 : 2;
+  if (60 / B > 140) level = Math.min(3, level + 1);
+  return { level, eighths: +e.toFixed(2), sixteenths: +s.toFixed(2) };
 }
 
 // The downbeat where the best `seconds` of a long song start: loud throughout, and best of all where the song jumps up

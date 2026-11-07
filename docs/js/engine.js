@@ -6,7 +6,7 @@ import { decode, analyse, hook, SR } from './beats.js';
 import { render as renderSfx } from './sfx.js';
 import { rng } from './util.js';
 import { loadSources, syncVideos, FX } from './media.js';
-import { grid9, blinds, pulse } from './styles.js';
+import { grid9, blinds, pulse, PACES } from './styles.js';
 import { velocity, dump } from './scenes.js';
 import { LOOK_STYLES } from './looks.js';
 
@@ -82,7 +82,9 @@ function compose(ctx, t, tl, sources, title, W, H) {
 const nearestDown = (grid, t) => grid.downbeats.filter(d => d >= -1e-3).reduce((a, b) => Math.abs(b - t) < Math.abs(a - t) ? b : a);
 
 // opts: {media: [File], song: ArrayBuffer, songInfo: {title, artist, link}, style, seconds, start (number or null),
-//        title, W, H, fps, seed, canvas (shows the frames as they render), onProgress(fraction, text), signal}
+//        title, W, H, fps, seed, canvas (shows the frames as they render), onProgress(fraction, text), signal,
+//        levels (the paces to make; default the song's and a calmer one), onEdit(edit, i) as each is done}
+// Returns the edits: [{video, bare, share, plan, pace}]
 export async function makeEdit(opts) {
   const { W, H } = opts, fps = opts.fps || 30, rnd = rng(opts.seed || 1), say = opts.onProgress || (() => {});
   say(0, 'Listening to the song');
@@ -105,58 +107,73 @@ export async function makeEdit(opts) {
   const sources = await loadSources(opts.media, W, H, rnd);
   const fx = new FX(W, H);
   const seconds = Math.min(opts.seconds || 1e9, cut.L.length / SR);
-  const tl = style(g, sources, seconds, fps, W, H, rnd, opts.title || '', fx);
-  const end = tl.end, n = Math.round(end * SR);
-
-  // audio: the song cut at the end of the edit with a short fade, plus the effects
-  const fxA = renderSfx(tl.sfx, n, SR, rnd), mixL = new Float32Array(n), mixR = new Float32Array(n);
-  const fade = Math.round(Math.min(0.8, end * 0.1) * SR), k = Math.tanh(1.05);
-  for (let i = 0; i < n; i++) {
-    const f = i > n - fade ? ((n - i) / fade) ** 2 : 1;
-    mixL[i] = Math.tanh(((cut.L[i] || 0) * f * 0.9 + fxA.L[i]) * 1.05) / k;
-    mixR[i] = Math.tanh(((cut.R[i] || 0) * f * 0.9 + fxA.R[i]) * 1.05) / k;
-  }
-
-  // video: encoded once, muxed twice (with the song, and with only the effects)
+  // two edits to choose from: at the pace the song asks for, and a calmer one (twice the note length; for a song
+  // already at the calmest pace, a busier one)
+  const level = g.pace.level, levels = opts.levels || [level, level < PACES.length - 1 ? level + 1 : level - 1];
   const vcfg = await pickVideoCodec(W, H, fps), acodec = await pickAudioCodec();
-  const mk = () => new Muxer({ target: new ArrayBufferTarget(), fastStart: 'in-memory', firstTimestampBehavior: 'offset',
-    video: { codec: 'avc', width: W, height: H, frameRate: fps }, audio: { codec: acodec.mux, sampleRate: SR, numberOfChannels: 2 } });
-  const withSong = mk(), bare = mk();
-  let err = null;
-  const venc = new VideoEncoder({ output: (c, m) => { withSong.addVideoChunk(c, m); bare.addVideoChunk(c, m); }, error: e => err = e });
-  venc.configure(vcfg);
-  const cv = opts.canvas; cv.width = W; cv.height = H;
-  const ctx = cv.getContext('2d'); ctx.imageSmoothingQuality = 'high';
-  const frames = Math.round(end * fps), hasVideo = sources.some(s => s.video), t0 = performance.now();
-  for (let i = 0; i < frames; i++) {
-    if (opts.signal?.aborted) throw new DOMException('Stopped', 'AbortError');
-    if (err) throw err;
-    const t = i / fps;
-    compose(ctx, t, tl, sources, opts.title, W, H);
-    // clips are seeked to the moment each frame shows, then the frame is drawn again
-    for (let pass = 0; hasVideo && pass < 3 && await syncVideos(sources, fps); pass++) compose(ctx, t, tl, sources, opts.title, W, H);
-    const vf = new VideoFrame(cv, { timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps) });
-    venc.encode(vf, { keyFrame: i % (fps * 2) === 0 }); vf.close();
-    while (venc.encodeQueueSize > 4) await new Promise(r => setTimeout(r, 2));
-    if (i % 3 === 0) {
-      const left = (performance.now() - t0) / (i + 1) * (frames - i) / 1000;
-      say(0.05 + 0.9 * i / frames, `Cutting it to the beat (${Math.ceil(left)} s left)`, beatInfo);
-      await new Promise(r => setTimeout(r, 0));
-    }
+  const edits = [];
+  for (let v = 0; v < levels.length; v++) {
+    const vr = rng((opts.seed || 1) + 7919 * v), gv = { ...g, level: levels[v] };
+    // the second edit starts from other photos, so the two differ in more than pace
+    const order = sources.map((_, i) => sources[(i + v * Math.floor(sources.length / 2)) % sources.length]);
+    const tl = style(gv, order, seconds, fps, W, H, vr, opts.title || '', fx);
+    const span = [v / levels.length, (v + 1) / levels.length], part = p => 0.04 + 0.95 * (span[0] + (span[1] - span[0]) * p);
+    const edit = await render(tl, order, vr, part);
+    edit.pace = PACES[levels[v]].desc; edit.level = levels[v];
+    edits.push(edit); opts.onEdit?.(edit, v);
   }
-  await venc.flush(); venc.close();
-  if (err) throw err;
-  say(0.96, 'Mixing the sound', beatInfo);
-  await encodeAudio(withSong, acodec, mixL, mixR);
-  await encodeAudio(bare, acodec, fxA.L, fxA.R);
-  withSong.finalize(); bare.finalize();
-  const share = { song: opts.songInfo || {}, song_start: +start.toFixed(2), song_start_text: fmt(start), length: +end.toFixed(2), bpm: +g.bpm.toFixed(1) };
   say(1, 'Done', beatInfo);
-  return {
-    video: new Blob([withSong.target.buffer], { type: 'video/mp4' }),
-    bare: new Blob([bare.target.buffer], { type: 'video/mp4' }),
-    share, plan: { bpm: g.bpm, start, moves: tl.moves, sfx: tl.sfx },
-  };
+  return edits;
+
+  async function render(tl, sources, rnd, part) {
+    const end = tl.end, n = Math.round(end * SR);
+    // audio: the song cut at the end of the edit with a short fade, plus the effects
+    const fxA = renderSfx(tl.sfx, n, SR, rnd), mixL = new Float32Array(n), mixR = new Float32Array(n);
+    const fade = Math.round(Math.min(0.8, end * 0.1) * SR), k = Math.tanh(1.05);
+    for (let i = 0; i < n; i++) {
+      const f = i > n - fade ? ((n - i) / fade) ** 2 : 1;
+      mixL[i] = Math.tanh(((cut.L[i] || 0) * f * 0.9 + fxA.L[i]) * 1.05) / k;
+      mixR[i] = Math.tanh(((cut.R[i] || 0) * f * 0.9 + fxA.R[i]) * 1.05) / k;
+    }
+    // video: encoded once, muxed twice (with the song, and with only the effects)
+    const mk = () => new Muxer({ target: new ArrayBufferTarget(), fastStart: 'in-memory', firstTimestampBehavior: 'offset',
+      video: { codec: 'avc', width: W, height: H, frameRate: fps }, audio: { codec: acodec.mux, sampleRate: SR, numberOfChannels: 2 } });
+    const withSong = mk(), bare = mk();
+    let err = null;
+    const venc = new VideoEncoder({ output: (c, m) => { withSong.addVideoChunk(c, m); bare.addVideoChunk(c, m); }, error: e => err = e });
+    venc.configure(vcfg);
+    const cv = opts.canvas; cv.width = W; cv.height = H;
+    const ctx = cv.getContext('2d'); ctx.imageSmoothingQuality = 'high';
+    const frames = Math.round(end * fps), hasVideo = sources.some(s => s.video), t0 = performance.now();
+    const label = edits.length ? 'Making the second edit' : 'Cutting it to the beat';
+    for (let i = 0; i < frames; i++) {
+      if (opts.signal?.aborted) throw new DOMException('Stopped', 'AbortError');
+      if (err) throw err;
+      const t = i / fps;
+      compose(ctx, t, tl, sources, opts.title, W, H);
+      // clips are seeked to the moment each frame shows, then the frame is drawn again
+      for (let pass = 0; hasVideo && pass < 3 && await syncVideos(sources, fps); pass++) compose(ctx, t, tl, sources, opts.title, W, H);
+      const vf = new VideoFrame(cv, { timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps) });
+      venc.encode(vf, { keyFrame: i % (fps * 2) === 0 }); vf.close();
+      while (venc.encodeQueueSize > 4) await new Promise(r => setTimeout(r, 2));
+      if (i % 3 === 0) {
+        const left = (performance.now() - t0) / (i + 1) * (frames - i) / 1000;
+        say(part(i / frames), `${label} (${Math.ceil(left)} s left)`, beatInfo);
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
+    await venc.flush(); venc.close();
+    if (err) throw err;
+    await encodeAudio(withSong, acodec, mixL, mixR);
+    await encodeAudio(bare, acodec, fxA.L, fxA.R);
+    withSong.finalize(); bare.finalize();
+    return {
+      video: new Blob([withSong.target.buffer], { type: 'video/mp4' }),
+      bare: new Blob([bare.target.buffer], { type: 'video/mp4' }),
+      share: { song: opts.songInfo || {}, song_start: +start.toFixed(2), song_start_text: fmt(start), length: +end.toFixed(2), bpm: +g.bpm.toFixed(1) },
+      plan: { bpm: g.bpm, start, moves: tl.moves, sfx: tl.sfx },
+    };
+  }
 }
 
 export const fmt = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;

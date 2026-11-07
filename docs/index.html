@@ -51,9 +51,13 @@
   .bar { height: 8px; background: #0f1115; border-radius: 4px; overflow: hidden; margin: 10px 0; }
   .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
   #preview { display: block; max-width: 100%; max-height: 60vh; margin: 10px auto 0; border-radius: 10px; background: #000; }
-  #result video { display: block; width: 100%; max-height: 72vh; background: #000; border-radius: 10px; }
-  .links { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
-  .links a { flex: 1 1 220px; text-align: center; padding: 11px; border-radius: 10px; border: 1px solid var(--line); color: var(--text); text-decoration: none; }
+  .edits { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .edit h3 { font-size: 14px; margin: 0 0 2px; }
+  .edit p { color: var(--dim); font-size: 12px; margin: 0 0 8px; }
+  .edit video { display: block; width: 100%; max-height: 70vh; background: #000; border-radius: 10px; }
+  .edit.wait { display: grid; place-items: center; min-height: 200px; border: 1px dashed var(--line); border-radius: 10px; color: var(--dim); }
+  .links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .links a { flex: 1 1 120px; text-align: center; padding: 10px; border-radius: 10px; border: 1px solid var(--line); color: var(--text); text-decoration: none; font-size: 13px; }
   .links a:first-child { background: var(--accent); border-color: var(--accent); color: #fff; }
   .ig { margin-top: 12px; padding: 12px; border-radius: 10px; background: #0f1115; border: 1px solid var(--line); }
   .ig b { color: var(--ok); }
@@ -121,17 +125,17 @@
     </div>
   </section>
 
-  <button class="go" id="go">Make my edit</button>
+  <button class="go" id="go">Make my edits</button>
   <section id="progress" hidden>
     <div id="step">Starting…</div>
     <div class="bar"><i id="fill"></i></div>
     <div class="hint" id="beat"></div>
     <canvas id="preview"></canvas>
-    <div class="hint">Keep this tab open and in front while it renders.</div>
+    <div class="hint">It makes two edits: one paced to the song, and a calmer one. Keep this tab open and in front while it renders.</div>
   </section>
   <section id="result" hidden>
-    <video id="video" controls playsinline></video>
-    <div class="links"><a id="dl" download="beatcut.mp4">Download (with the song)</a><a id="dl2" download="beatcut-no-music.mp4">Download for Instagram / TikTok (effects only)</a></div>
+    <h2>Two edits to choose from</h2>
+    <div class="edits" id="edits"></div>
     <div class="ig" id="ig"></div>
     <div class="credits" id="credits" hidden></div>
   </section>
@@ -221,23 +225,37 @@ $('go').onclick = async () => {
   const vertical = $('format').value === 'vertical', start = $('start').value === '' ? null : parseFloat($('start').value);
   try {
     await document.fonts.load('40px Fraunces'); await document.fonts.load('italic 40px Fraunces');
+    const base = (info.title || 'beatcut').replace(/[^\w-]+/g, '-').toLowerCase() + '-' + style;
+    const CALL = ['On the beat', 'Laid back'];
+    $('edits').innerHTML = '<div class="edit wait">Making the first edit…</div><div class="edit wait">The second edit comes next</div>';
+    let first = null;
+    // each edit appears as soon as it is done; the first one shows while the second renders
+    const show = (ed, i) => {
+      const a = URL.createObjectURL(ed.video), b = URL.createObjectURL(ed.bare), name = String.fromCharCode(65 + i);
+      const calmer = first && ed.level > first.level, call = i === 0 ? CALL[0] : calmer ? CALL[1] : 'Busier';
+      const el = document.createElement('div'); el.className = 'edit';
+      el.innerHTML = `<h3>Edit ${name}: ${call}</h3><p>${ed.pace}</p><video controls playsinline src="${a}"></video>
+        <div class="links"><a href="${a}" download="${base}-${name.toLowerCase()}.mp4">With the song</a><a href="${b}" download="${base}-${name.toLowerCase()}-no-music.mp4">Effects only</a></div>`;
+      $('edits').children[i].replaceWith(el);
+      if (i === 0) {
+        first = ed;
+        $('edits').children[1].textContent = 'Making the calmer edit…';
+        $('result').hidden = false; $('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    };
     const out = await makeEdit({
       media, song, songInfo: info, style, seconds: parseFloat($('seconds').value), start, title: $('title').value.trim(),
       W: vertical ? 1080 : 1920, H: vertical ? 1920 : 1080, fps: 30, seed: Math.floor(Math.random() * 1e6), canvas: $('preview'),
       onProgress: (p, text, beat) => { $('step').textContent = text + '…'; $('fill').style.width = (p * 100) + '%'; if (beat) $('beat').textContent = beat; },
+      onEdit: show,
     });
-    const a = URL.createObjectURL(out.video), b = URL.createObjectURL(out.bare);
-    $('video').src = a; $('dl').href = a; $('dl2').href = b;
-    const base = (info.title || 'beatcut').replace(/[^\w-]+/g, '-').toLowerCase() + '-' + style;
-    $('dl').download = base + '.mp4'; $('dl2').download = base + '-no-music.mp4';
-    const sh = out.share, songName = `<b>${esc(info.title)}</b>${info.artist ? ' by ' + esc(info.artist) : ''}`;
+    const sh = out[0].share, songName = `<b>${esc(info.title)}</b>${info.artist ? ' by ' + esc(info.artist) : ''}`;
     $('ig').innerHTML = tab === 'sample'
       ? `Made with a test song (${sh.bpm.toFixed(0)} BPM, ${sh.length.toFixed(1)} s). It isn't in Instagram's or TikTok's music library, so post the version with the song.`
-      : `To post with the real song: upload the <i>effects only</i> video to Instagram or TikTok, add ${songName} from their music library, and set it to start at <b>${fmt(sh.song_start)}</b>. The cuts are timed to that point (${sh.bpm.toFixed(0)} BPM, ${sh.length.toFixed(1)} s).`;
+      : `To post with the real song: upload the <i>effects only</i> video to Instagram or TikTok, add ${songName} from their music library, and set it to start at <b>${fmt(sh.song_start)}</b>. Both edits are timed to that point (${sh.bpm.toFixed(0)} BPM).`;
     $('credits').hidden = !credits.length;
     $('credits').innerHTML = 'Photo credits (put these where you post): ' + credits.map(c => `${esc(c.title)}, ${esc(c.artist || 'unknown')}, ${esc(c.license)} (<a href="${esc(c.page)}" target="_blank" rel="noopener">source</a>)`).join(' · ');
-    $('progress').hidden = true; $('result').hidden = false;
-    $('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    $('progress').hidden = true;
   } catch (e) {
     console.error(e);
     $('step').innerHTML = `<span class="err">Something went wrong: ${esc(e.message || e)}</span>`;

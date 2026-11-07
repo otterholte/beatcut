@@ -7,7 +7,7 @@
 // dump      the photo dump: polaroids drop onto a blurred backdrop one per beat and pile up, a caption on the first;
 //           every fourth bar it zooms into the top photo for full-screen beat cuts, then a camera flash brings the pile
 //           back; piles are swept off the table on the bar.
-import { slots } from './styles.js';
+import { slots, paceOf } from './styles.js';
 import { easeOut, easeIn, clamp, lastAt, canvas } from './util.js';
 
 export class Scene {
@@ -32,14 +32,17 @@ export class Velocity extends Scene {
     this.drop = drop = this.snap(drop);
     const beats = grid.beats.filter(b => b >= -1e-3 && b < end - 1e-3);
     let k = 0; const take = () => k++ % sources.length;
+    const p = paceOf(grid);
     this.shots = []; this.hits = [];          // shots: [t, sid, transition, dir]; hits: [t, shake, rgb, flash]
-    // intro: a new shot every two beats, then sixteenth-note stutter cuts on the last beat before the drop
+    // intro: a new shot every two beats (four when calm), then stutter cuts into the drop: four sixteenths, four
+    // eighths, or two eighths at the calm paces
+    const sStep = Math.min(p.step, 0.5) * B, sCount = p.step >= 1 ? 2 : 4, sFrom = drop - sCount * sStep;
     for (const b of beats) {
-      if (b >= drop - B - 1e-3) break;
-      if (Math.round((b - beats[0]) / B) % 2 === 0) this.shots.push([this.snap(b), take(), 'cut', null]);
+      if (b >= sFrom - 1e-3) break;
+      if (Math.round((b - beats[0]) / B) % Math.min(4, 2 * p.every) === 0) this.shots.push([this.snap(b), take(), 'cut', null]);
     }
-    for (let j = 0; j < 4; j++) {
-      const ts = drop - B + j * B / 4;
+    for (let j = 0; j < sCount; j++) {
+      const ts = sFrom + j * sStep;
       this.shots.push([this.snap(ts), take(), 'cut', null]); this.sound(ts, 'tick', 0.5 + 0.1 * j); this.hits.push([this.snap(ts), 0.12, 0, 0]);
     }
     this.sound(drop, 'whoosh', 0.75, 0, { d: Math.min(drop, bar) });
@@ -48,9 +51,9 @@ export class Velocity extends Scene {
     // the drop
     this.shots.push([drop, take(), 'flash', null]); this.hits.push([drop, 1, 1, 1]);
     this.sound(drop, 'impact', 1); this.sound(drop, 'flash', 0.6);
-    // after the drop: a cut on every beat; the last bar holds one shot
+    // after the drop: a cut every beat (or every `every` beats); the last bar holds one shot
     const hold = this.snap(end - bar), dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-    beats.filter(x => x > drop + 1e-3 && x < hold - 1e-3).forEach((b0, i) => {
+    beats.filter(x => x > drop + 1e-3 && x < hold - 1e-3 && Math.round((x - drop) / B) % p.every === 0).forEach((b0, i) => {
       const b = this.snap(b0), onBar = downs.some(d => Math.abs(b - d) < 0.02);
       if (onBar) {
         const kind = this.moves.length % 2 ? 'flash' : 'zoom';
@@ -62,8 +65,8 @@ export class Velocity extends Scene {
         const d = rnd.choice(dirs);
         this.shots.push([b, take(), 'whip', d]); this.hits.push([b, 0.25, 0.2, 0]);
         this.sound(b, 'whoosh', 0.35, -0.5 * d[0], { d: 0.16 }); this.sound(b, 'tick', 0.35);
-        // double time on the off-beat of beat 3, every other bar
-        if (i % 8 === 6) { const t2 = this.snap(b + B / 2); this.shots.push([t2, take(), 'cut', null]); this.hits.push([t2, 0.3, 0.3, 0]); this.sound(t2, 'tick', 0.6); }
+        // double time on the off-beat of beat 3, every other bar (at the busiest pace)
+        if (p.step <= 0.25 && i % 8 === 6) { const t2 = this.snap(b + B / 2); this.shots.push([t2, take(), 'cut', null]); this.hits.push([t2, 0.3, 0.3, 0]); this.sound(t2, 'tick', 0.6); }
       }
     });
     this.shots.push([hold, take(), 'flash', null]); this.hits.push([hold, 0.8, 0.8, 0.9]);
@@ -128,13 +131,15 @@ export class Dump extends Scene {
     this.sources = sources; this.title = title; this.titleMode = null;       // the title is a caption on the first photo
     const B = grid.beat, bar = grid.bar; this.B = B;
     const [starts, L] = slots(grid, seconds, 1), end = starts[starts.length - 1] + L;
-    const beats = grid.beats.filter(b => b >= -1e-3 && b < end - 1e-3).map(b => this.snap(b));
+    // a card (or a full-screen cut) every `every` beats of the pace
+    const every = paceOf(grid).every, d0 = grid.downbeats.find(d => d >= -1e-3) ?? 0;
+    const beats = grid.beats.filter(b => b >= -1e-3 && b < end - 1e-3 && Math.round((b - d0) / B) % every === 0).map(b => this.snap(b));
     const downs = grid.downbeats.filter(d => d >= -1e-3 && d < end).map(d => this.snap(d));
     this.P = W >= H ? Math.round(0.6 * H) : Math.round(0.74 * W);        // photo side on screen
     this.cards = []; this.full = []; this.flashes = [];                     // full: [t0, t1, sid]
     let k = 0; const take = () => k++ % sources.length;
     this.fall = Math.min(0.14, B * 0.4);
-    let pile = [], mode = 'pile';
+    let pile = [], mode = 'pile', zoomAt = 0;
     const lastBar = downs.length ? downs[downs.length - 1] : end - bar;
     for (const b of beats) {
       const bi = downs.filter(d => d <= b + 1e-3).length - 1, onBar = downs.some(d => Math.abs(b - d) < 1e-3), ph = ((bi % 4) + 4) % 4;
@@ -145,12 +150,15 @@ export class Dump extends Scene {
           this.sound(b, 'whoosh', 0.6, 0, { d: 0.25 }); pile = [];
         }
         if (ph === 2 && pile.length && b < lastBar) {
-          pile[pile.length - 1].zoom = b; mode = 'full';
+          pile[pile.length - 1].zoom = b; mode = 'full'; zoomAt = b;
           this.sound(b, 'whoosh', 0.5, 0, { d: 0.2 }); this.sound(b, 'pop', 0.8);
           continue;
         }
         if (ph === 3 && mode === 'full') {
-          this.full[this.full.length - 1][1] = b; mode = 'pile';
+          // (at a calm pace the zoomed photo may have held the whole bar, with no full-screen cuts after it)
+          const f = this.full[this.full.length - 1];
+          if (f && f[0] >= zoomAt) f[1] = b;
+          mode = 'pile';
           for (const c of pile) c.gone = b;
           pile = []; this.flashes.push(b); this.sound(b, 'flash', 0.9);
         }
@@ -167,7 +175,8 @@ export class Dump extends Scene {
       pile.push(c); this.cards.push(c);
       this.sound(b, 'slap', 0.9, (c.x / W - 0.5) * 1.2); this.sound(b, 'tick', 0.25);
     }
-    if (this.full.length && mode === 'full') this.full[this.full.length - 1][1] = end;
+    const lastFull = this.full[this.full.length - 1];
+    if (lastFull && mode === 'full' && lastFull[0] >= zoomAt) lastFull[1] = end;
     const out = this.snap(end - B / 2);
     for (const c of pile) if (!c.sweep) c.sweep = [out, rnd.choice([-1, 1])];
     this.sound(out, 'whoosh', 0.6, 0, { d: 0.25 });

@@ -12,7 +12,7 @@ filmstrip  a strip of film across the screen (down it, for vertical video) advan
 import math
 import numpy as np, cv2
 from scenes import Scene, vignette, rotation, ease_out, clamp
-from styles import slots
+from styles import slots, pace_of
 
 def beat_plan(grid, seconds, snap):
     """Beats and bar starts of the edit, the end (a whole bar), and the start of the held last bar."""
@@ -39,7 +39,8 @@ class Cuts(Scene):
         super().__init__(W, H, fps)
         self.lk = lk = LOOKS[look]; self.sources = sources; B = grid['beat']; self.B = B
         beats, downs, end, hold = beat_plan(grid, seconds, self.snap)
-        every = lk['every'] * (2 if lk['every'] == 1 and B < 0.36 else 1)      # very fast songs: every other beat
+        # the look's cut length times the pace's, at most two bars (very fast songs: every other beat at least)
+        every = min(8, max(lk['every'] * pace_of(grid)['every'], 2 if B < 0.36 else 1))
         n = len(sources); k = 0; self.shots = []
         for i, b in enumerate(beats):
             if b >= hold - 1e-3: break
@@ -175,7 +176,9 @@ class Filmstrip(Scene):
         self.n = n = len(sources)
         self.steps, self.full, self.flashes = [], [], []  # steps: (t, frame the strip moves to); full: [t0, t1, [(t, sid)]]
         idx, mode = 0, 'strip'
-        for b in beats:
+        # the strip moves (and the open frame cuts) every `every` beats of the pace
+        every = pace_of(grid)['every']; d0 = downs[0] if downs else 0
+        for b in [x for x in beats if round((x - d0) / B) % every == 0]:
             bi = sum(1 for d in downs if d <= b + 1e-3) - 1; bar = on(b, downs)
             if bar and bi % 4 == 3 and b < hold - 1e-3 and mode == 'strip':
                 mode = 'open'; self.full.append([b, None, [(b, idx % n)]])

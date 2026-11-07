@@ -126,4 +126,15 @@ def analyse(audio, sr):
     while down[0] - bar > -0.05: down = np.insert(down, 0, down[0] - bar)
     return {'bpm': 60 * rate / period, 'beat': period / rate, 'bar': bar, 'beats': [float(b) for b in beats],
             'drop': None if drop is None else float(beats[drop]),
-            'downbeats': [float(d) for d in down if d > -bar]}
+            'downbeats': [float(d) for d in down if d > -bar], 'pace': pace(env, beats, period / rate, rate)}
+
+def pace(env, beats, B, rate):
+    """How busy the music is between the beats, as the pace an edit should move at (an index into styles.PACES):
+    0 sixteenth notes (busy hi-hats, strong off-beats), 1 eighth notes, 2 quarter notes (a song with little between its
+    beats, like a strummed folk song). Fast songs move one step calmer."""
+    b = np.array([x for x in beats if 0 < x < len(env) / rate - 1])
+    peak = lambda ts: np.mean([env[max(0, int(round(t * rate)) - 2):int(round(t * rate)) + 3].max() for t in ts])
+    q = peak(b) + 1e-9; e = peak(b + B / 2) / q; s = (peak(b + B / 4) + peak(b + 3 * B / 4)) / 2 / q
+    level = 0 if e >= 0.9 and s >= 0.2 else 1 if e >= 0.7 else 2
+    if 60 / B > 140: level = min(3, level + 1)
+    return {'level': level, 'eighths': round(float(e), 2), 'sixteenths': round(float(s), 2)}

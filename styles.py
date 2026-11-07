@@ -59,6 +59,28 @@ class Timeline:
     @property
     def events(self): return [e for ev in self.ev for e in ev]
 
+# How fast an edit moves, in notes: `step` (beats) between the parts of a build (tiles, strips, stutters), `every`
+# (beats) between cuts, `bars` per move. The song picks one (beats.pace); the job can ask for another ("pace").
+PACES = [
+    {'name': 'sixteenth notes', 'step': 0.25, 'every': 1, 'bars': 1},
+    {'name': 'eighth notes', 'step': 0.5, 'every': 1, 'bars': 1},
+    {'name': 'quarter notes', 'step': 1, 'every': 2, 'bars': 2},
+    {'name': 'half notes', 'step': 2, 'every': 4, 'bars': 4},
+]
+def pace_of(grid): return PACES[max(0, min(len(PACES) - 1, grid.get('level', 0)))]
+
+def step_for(p, B, count, room):
+    """The step for `count` parts of a build whose last part must start within `room` seconds: the pace's note,
+    halved until it fits."""
+    step = p['step'] * B
+    while step * (count - 1) > room + 1e-6 and step > B / 8 + 1e-6: step /= 2
+    return step
+
+def every_beat(grid, every, lo=-1e-3, hi=1e9):
+    """The beats a cut lands on: every `every` beats, counted from the first bar."""
+    d0 = next((d for d in grid['downbeats'] if d >= lo), 0); B = grid['beat']
+    return [b for b in grid['beats'] if b >= max(lo, d0 - 1e-3) and b < hi and (every <= 1 or round((b - d0) / B) % every == 0)]
+
 class Pool:
     """Hands out the media in order, round and round."""
     def __init__(self, sources): self.n = len(sources); self.i = 0
@@ -71,21 +93,27 @@ def slots(grid, seconds, per_bar):
     """Move start times: every bar (or every two bars at fast tempos) from 0 until the song or the limit runs out."""
     bar = grid['bar']; per = per_bar if bar * per_bar >= 1.6 else per_bar * 2
     downs = [d for d in grid['downbeats'] if d >= -1e-3]
-    starts = downs[::per]
-    L = bar * per
-    while starts and starts[-1] + L > seconds + 0.05: starts.pop()
-    if len(starts) < 2: raise SystemExit('the song is too short for this style (needs at least two bars)')
-    return starts, L
+    while True:
+        starts = downs[::per]; L = bar * per
+        while starts and starts[-1] + L > seconds + 0.05: starts.pop()
+        if len(starts) >= 2: return starts, L
+        # a short edit: shorter moves, so there are at least two
+        if per == 1: raise SystemExit('the song is too short for this style (needs at least two bars)')
+        per = max(1, per // 2)
 
 SPIRAL = [6, 3, 0, 1, 2, 5, 8, 7, 4]          # the template's assemble order: up the left, across, down the right, centre last
 SPIRAL_R = [5, 8, 7, 6, 3, 0, 1, 2, 4]
 CROSS, CORNERS = [1, 3, 5, 7], [0, 2, 6, 8]
 
 def grid9(grid, sources, seconds, fps, W, H, rnd, has_title):
-    tl = Timeline(3, 3, W, H, fps); pool = Pool(sources); B = grid['beat']
-    pop = max(1, round(fps * 0.04)) / fps          # one tile per frame, like the template
-    build_step = max(2, round(fps * 0.075)) / fps
-    starts, L = slots(grid, seconds, 1)
+    tl = Timeline(3, 3, W, H, fps); pool = Pool(sources); B = grid['beat']; p = pace_of(grid); fast = p['step'] <= 0.25
+    pop = max(1, round(fps * 0.04)) / fps          # one tile per frame, like the template (the busiest pace)
+    starts, L = slots(grid, seconds, p['bars'])
+    # the calmer paces build on the note instead, fitted into the move (at half notes the tiles come in threes)
+    group = 3 if p['step'] >= 2 else 1; at = lambda i: i // group
+    tiles = pop if fast else step_for(p, B, 9 // group, L * 0.8)
+    build_step = max(2, round(fps * 0.075)) / fps if fast else tiles
+    strips = B / 4 if fast else step_for(p, B, 3, L * 0.5)
     body = ['columns', 'mosaic', 'build', 'cuts', 'checker', 'rows', 'mosaic', 'build', 'checker', 'cuts']
     plan = ['assemble'] + [m for m, _ in zip(itertools.cycle(body), starts[1:])]
     # the last move shows one picture, so the drop-out at the end breaks a whole image apart like the template
@@ -102,15 +130,16 @@ def grid9(grid, sources, seconds, fps, W, H, rnd, has_title):
         if move == 'assemble':
             a = pool.take()
             for i, ci in enumerate(SPIRAL):
-                tl.put(t + i * pop, ci, a, 'full', t0=t); tl.sound(t + i * pop, 'tick', ci, 0.8)
+                tl.put(t + at(i) * tiles, ci, a, 'full', t0=t)
+                if i % group == 0: tl.sound(t + at(i) * tiles, 'tick', ci, 0.8)
             state['full'] = (a, t)
             if has_title:
-                t1 = t + min(2 * B, L * 0.5)
+                t1 = t + max(9 // group * tiles, min(2 * B, L * 0.5))
                 tl.titles.append((tl.snap(t1), tl.snap(t + L - 2 / fps))); tl.sound(t1, 'pop', g=0.8)
         elif move in ('columns', 'rows'):
             tl.sound(t, 'whoosh', g=0.5)
             for k in range(3):
-                s, tk = pool.take(), t + k * B / 4
+                s, tk = pool.take(), t + k * strips
                 for j in range(3):
                     ci = j * 3 + k if move == 'columns' else k * 3 + j
                     tl.put(tk, ci, s, 'col' if move == 'columns' else 'row', t0=tk)
@@ -120,7 +149,8 @@ def grid9(grid, sources, seconds, fps, W, H, rnd, has_title):
             tl.sound(t, 'whoosh', g=0.6)
             order = list(range(9)); rnd.shuffle(order)
             for i, ci in enumerate(order):
-                tl.put(t + i * pop, ci, pool.take(), 'cell', t0=t); tl.sound(t + i * pop, 'tick', ci, 0.7)
+                tl.put(t + at(i) * tiles, ci, pool.take(), 'cell', t0=t)
+                if i % group == 0: tl.sound(t + at(i) * tiles, 'tick', ci, 0.7)
             # an accent: one tile blinks white an eighth before the next bar
             ci = rnd.choice([c for c in range(9) if c != 4] + [4, 4])
             tf = t + L - B / 2
@@ -130,35 +160,39 @@ def grid9(grid, sources, seconds, fps, W, H, rnd, has_title):
         elif move == 'build':
             e = pool.take(); order = SPIRAL_R if rnd.random() < 0.5 else SPIRAL[::-1][1:] + [4]
             for i, ci in enumerate(order):
-                tl.put(t + i * build_step, ci, e, 'full', t0=t); tl.sound(t + i * build_step, 'tick', ci, 0.75)
+                tl.put(t + at(i) * build_step, ci, e, 'full', t0=t)
+                if i % group == 0: tl.sound(t + at(i) * build_step, 'tick', ci, 0.75)
             state['full'] = (e, t)
         elif move == 'cuts':
-            for k in range(3): full(t + k * B, pool.take(), g=0.55 if k else 0.75)
+            # a cut every `every` beats, leaving the move's last beat to breathe
+            k = 0
+            while k * p['every'] * B < L - B * 0.9: full(t + k * p['every'] * B, pool.take(), g=0.55 if k else 0.75); k += 1
         elif move == 'checker':
             tl.sound(t, 'whoosh', g=0.6)
             a, b = pool.take(), pool.take()
             for ci in range(9): tl.white(t, ci)
             tl.sound(t, 'flash', g=1.0)
             for ci in range(9): tl.put(t + 1 / fps, ci, a if ci in CORNERS + [4] else b, 'full', t0=t)
-            tr = t + min(2 * B, L * 0.55)
+            tr = t + (min(2 * B, L * 0.55) if fast else L / 2)
             for ci in CROSS: tl.put(tr, ci, a, 'full', t0=t)
             tl.sound(tr, 'tick', g=1.0)
             state['full'] = (a, t)
     end = starts[-1] + L
     # tiles drop out on the last beat: the cross, then the corners, the centre last
-    tout = end - B
+    # (on the last beat; the calmer paces take longer)
+    span = 8 * pop if fast else min(2 * B, 4 * tiles); tout = end - (B if fast else span + B / 2)
     for ci in CROSS: tl.clear(tout, ci)
     tl.sound(tout, 'tick', g=1.0)
     for i, ci in enumerate(CORNERS):
-        tl.clear(tout + (i + 1) * 2 * pop, ci); tl.sound(tout + (i + 1) * 2 * pop, 'tick', ci, 0.8)
-    tl.clear(tout + 6 * 2 * pop / 1.5, 4); tl.sound(tout + 6 * 2 * pop / 1.5, 'tick', g=0.9)
+        tc = tout + (i + 1) * span / 5; tl.clear(tc, ci); tl.sound(tc, 'tick', ci, 0.8)
+    tl.clear(tout + span, 4); tl.sound(tout + span, 'tick', g=0.9)
     tl.end = tl.snap(end + 0.3)
     return tl
 
 def blinds(grid, sources, seconds, fps, W, H, rnd, has_title, n=4):
-    tl = Timeline(1, n, W, H, fps); pool = Pool(sources); B = grid['beat']
-    starts, L = slots(grid, seconds, 1)
-    s16 = B / 4
+    tl = Timeline(1, n, W, H, fps); pool = Pool(sources); B = grid['beat']; p = pace_of(grid)
+    starts, L = slots(grid, seconds, p['bars'])
+    s16 = step_for(p, B, n, L * 0.8)          # the step between strips (a sixteenth at the busiest pace)
     for i, t in enumerate(starts):
         kind = 'wipe' if i % 2 == 0 else 'split'
         tl.moves.append({'t': round(t, 3), 'move': kind})
@@ -170,22 +204,25 @@ def blinds(grid, sources, seconds, fps, W, H, rnd, has_title, n=4):
         else:
             for k, ci in enumerate(order):
                 tl.put(t + k * s16, ci, pool.take(), 'cell', t0=t + k * s16); tl.sound(t + k * s16, 'tick', ci, 0.9)
-            ci = rnd.randrange(n); tf = t + 2 * B; prev = tl.state(ci, tf)
+            ci = rnd.randrange(n); tf = t + min(L - B / 2, max(n * s16, min(2 * B, L / 2))); prev = tl.state(ci, tf)
             tl.white(tf, ci); tl._add(ci, tl.snap(tf + 2 / fps), prev); tl.sound(tf, 'flash', ci, 0.8)
         if i == 0 and has_title:
-            tl.titles.append((tl.snap(t + 2 * B), tl.snap(t + L - 2 / fps))); tl.sound(t + 2 * B, 'pop', g=0.8)
+            t1 = t + min(L - B, max(n * s16, min(2 * B, L / 2)))
+            tl.titles.append((tl.snap(t1), tl.snap(t + L - 2 / fps))); tl.sound(t1, 'pop', g=0.8)
         if i + 1 < len(starts) and (i + 1) % 2 == 0: tl.sound(starts[i + 1], 'whoosh', g=0.5)
     end = starts[-1] + L
+    out = min(s16, B / 2)          # the strips clear one by one into the end
     for k in range(n):
-        tl.clear(end - B + k * s16, k); tl.sound(end - B + k * s16, 'tick', k, 0.8)
+        tc = end - B / 2 - (n - 1 - k) * out; tl.clear(tc, k); tl.sound(tc, 'tick', k, 0.8)
     tl.end = tl.snap(end + 0.3)
     return tl
 
 def pulse(grid, sources, seconds, fps, W, H, rnd, has_title):
-    tl = Timeline(1, 1, W, H, fps); pool = Pool(sources); B = grid['beat']
-    starts, L = slots(grid, seconds, 1)
+    tl = Timeline(1, 1, W, H, fps); pool = Pool(sources); B = grid['beat']; p = pace_of(grid)
+    tl.title_mode = 'center'           # one picture: the title sits in the middle
+    starts, L = slots(grid, seconds, p['bars'])
     end = starts[-1] + L
-    beats = [b for b in grid['beats'] if -1e-3 <= b < end - B / 2]
+    beats = every_beat(grid, p['every'], hi=end - B / 2)          # a new picture every `every` beats
     downs = set(round(d, 3) for d in grid['downbeats'])
     for i, b in enumerate(beats):
         bar_start = round(b, 3) in downs

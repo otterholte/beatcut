@@ -80,6 +80,15 @@ edit starts, length, tempo) and `<out>.plan.json` (tempo, bar starts, every move
 | `velocity` | free | The phonk "shake" edit (car / sports / gym edits). Starts two bars before the song's drop: dark, letterboxed, desaturated, a cut every two beats, sixteenth-note stutter cuts and a riser into the drop. On the drop: white flash, hard shake, RGB split, full colour, the letterbox snaps open. Then a cut on every beat: motion-blurred whip pans (whoosh each), zoom-throughs and flashes on the bars (impact), double-time cuts every other bar; the last bar holds one shot and fades. |
 | `dump` | free | The photo dump. Polaroids drop onto a blurred backdrop of the newest photo, one per beat, and pile up (a paper slap each); the title is handwritten on the first. Every fourth bar it zooms into the top photo for full-screen beat cuts, then a camera flash brings the pile back; piles are swept off on the bar. |
 
+### Pace
+
+Every style moves at a pace measured from the song (`beats.py` `pace`): how strong the onsets are on the off-beat
+eighths and the sixteenths compared with the beats. A busy song (hi-hats, strong off-beats) gets the template's
+sixteenth-note builds and a cut on every beat; a song with little between its beats (a strummed folk song) gets builds
+on quarter notes, a cut every two beats and longer moves. The paces are `PACES` in `styles.py`: sixteenth, eighth,
+quarter and half notes. The web version makes two edits each time, one at the song's pace and a calmer one at the next
+(half notes and a cut every bar, for a calm song); in Python, `"pace"` in the job (or `--pace`) is `auto`, `calm` or 0-3.
+
 `beats.py` also finds a drop (the moment the song gets much louder) and lines the bars up so the drop starts one; that
 also fixes a grid locked half a beat off by off-beat hi-hats. Free-form styles (`scenes.py`) draw whole frames
 themselves instead of filling grid cells (`velocity` and `dump` in `scenes.py`, the rest in `looks.py`).
